@@ -24,19 +24,23 @@
 % makefiles.
 
 % some useful packages
-\usepackage{times}
+\usepackage{libertine}
 \usepackage{fullpage}
 \usepackage{graphicx}
-\usepackage{amsmath}
+\usepackage{amsmath, lipsum, afterpage}
 \usepackage[numbers,sort]{natbib}
 \usepackage[backref,pageanchor=true,plainpages=false, pdfpagelabels, bookmarks,bookmarksnumbered,
 %pdfborder=0 0 0,  %removes outlines around hyper links in online display
 ]{hyperref}
 \usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{caption}
 
 \usepackage[capitalize,noabbrev,nameinlink]{cleveref}
 \usepackage{float}
 \usepackage[scaled]{inconsolata}
+
+\hypersetup{colorlinks,linkcolor={blue},citecolor={blue},urlcolor={red}}  
 
 \captionsetup{labelfont=bf}
 % \captionsetup{font=small}
@@ -66,7 +70,7 @@
 \pagestyle{empty}
 
 \title{ %% {\it \huge Thesis Proposal}\\
-{\bf Code Generation Log Replay for In-memory Database Management Systems}}
+{\bf Code Generation Recovery Log Replay for In-Memory Database Management Systems}}
 \author{Tianlei Pan}
 \date{June}
 \Year{2021}
@@ -83,7 +87,7 @@ Wenting Ye \\
 % copyright notice generated automatically from Year and author.
 % permission added if \permission{} given.
 
-\keywords{Code Generation, Log Replay, Recovery, Query Compilation}
+\keywords{Code Generation, Log Replay, Recovery, query compilation}
 
 \maketitle
 
@@ -96,7 +100,7 @@ Wenting Ye \\
 %% into different files and input them into this file...
 
 \begin{abstract}
-Code generation is a widely-used technique for improving query execution throughput by compiling instructions into native code. This technique, however, leads to design challenges for the recovery system of a database management system. The log replay process will be disjoint from the built-in execution engine that has been adapted to operate efficiently on compiled code. This usually leads to the implementation of a separate "execution engine" to deal with the execution of log records, which can be a huge waste of engineering efforts. To resolve this design conflict between code generation and database recovery, we propose a code generation design for the recovery system. We ask the recovery system to convert log records into compiled code that will be easily accepted by the execution engine. Our results show that while our approach creates more performance overhead compared to using a separate execution engine, it also introduces much less engineering overhead and is superior in aspects such as index updates and constraint checking.
+Code generation is an optimization technique for improving query execution throughput by compiling query plans into native code. This technique, however, leads to design challenges for the recovery system of a database management system. The log replay process will be disjoint from the built-in execution engine that has adapted to operate efficiently on compiled code. This leads to the implementation of a separate execution engine to deal with the execution of log records, which can be a huge waste of engineering efforts. To resolve this design conflict between code generation and database recovery, we present a unified approach to support both query execution and log replay in a code-generation-based DBMS. We ask the recovery system to convert log records into compiled code that will be easily accepted by the execution engine. Our results show that while our approach incurs a higher performance overhead compared to using a separate execution engine, it requires much less engineering effort and is potentially superior in aspects such as index updates and constraint checking.
 \end{abstract}
 
 \begin{acknowledgments}
@@ -133,131 +137,171 @@ yes
 
 
 \chapter{Introduction}
-A \textit{database management system (DBMS)} is a software that is responsible for storing data, analyzing data, and interacting with applications. Depending on the use case, a DBMS can be designed to focus more on either capturing data, or analyzing data. \textit{On-line Analytical Processing (OLAP)} applications focus on reading, analyzing and aggregating cold data that is less likely to be modified. On the other hand, \textit{On-line Transaction Processing (OLTP)} applications work with write-heavy transactions that modify the database frequently.
+Database management system (DBMS) is a category of software that are responsible for storing data, analyzing data, and interacting with applications. In 1970, E.F. Codd proposed the relational model of data, 
 
-Consequently, recovery and durability in OLTP applications are more of a pressing issue compared to OLAP systems. Naive or manual backups are usually sufficient for read-only OLAP applications. However, since OLTP databases are being updated by transactions constantly, naive backups will either cause the database to lose significant amount of data, or fail to preserve the \textit{ACID (atomicity, consistency, isolation, and durability)} properties. This requires OLTP applications to develop specialized recovery mechanism to handle these problems. Commercial DBMS often combines Write-ahead Logging (WAL) with checkpoints to preserve database durability.
+Depending on the use case, a DBMS can focus more on either capturing data or analyzing data. On-line Analytical Processing (OLAP) DBMSs focus on reading, analyzing and aggregating data that is less likely to be modified. On the other hand, On-line Transaction Processing (OLTP) DBMSs support write-heavy transactions that modify the database frequently~\cite{conn05}.
 
-In addition, OLTP systems also require specialized algorithms and implementations to execute write transactions. Query compilation is an important optimization technique used in OLTP systems to greatly reduce the number of instructions that need to be executed. A DBMS uses a processing model (e.g. Iterator, Vectorization, Materialization) to determine how the DBMS executes a query plan. The processing model is responsible for translating a query into an intermediate expression. The execution engine then breaks down the expression into various tasks for execution. To speed up this process, the DBMS can use an optimization technique known as \textit{Query Compilation}. Query compilation requires the DBMS to generate specialized code for execution tasks to increase execution throughput. These specialized code are often created using an off-shelf compiler into a C/C++ program that implements the functionality of a certain query.
+Regardless of the type of a DBMS, both OLTP and OLAP DBMSs are susceptible to failures. The DBMS may shutdown unexpectedly, fail to execute a query, or cease to function due to corrupted data. These failures threaten the integrity of the database and make the DBMS unreliable. Therefore, it is important for a DBMS to distinguish between different kinds of failures in order to develop mechanisms to maintain integrity.
 
-While query compilation has proved successful in increasing the efficiency of a DBMS, it comes with several drawbacks. Implementing a query compilation system can be quite an ordeal. It requires additional knowledge of compiler systems (e.g. LLVM) and huge amounts of engineering work to translate different execution tasks. Moreover, the DBMS also need to modify other components to accommodate with an execution engine reliant on query compilation.
+A DBMS can encounter three types of failures: Transaction Failures, System Failures, and Media Failures\cite{theo83}. Transaction Failures are the most common type of DBMS failures. Transaction Failures occur when a transaction fails to commit, either at its own request (e.g., logical errors) or on behalf of the DBMS (e.g., resource unavailability). When a transaction fails, the system needs to react within its lifetime to prevent data inconsistency~\cite{aries}. The DBMS needs to decide whether and how it should undo the changes of the failing transaction. Since a DBMS is running transactions rapidly while its active, Transaction Failures can occur as much as 100 times per minute\cite{theo83}. System Failures occur due to hardware failures (e.g., power outage), operating system faults (e.g., insufficient memory) or DBMS exceptions. Each of these trigger events can cause the DBMS to shutdown unexpectedly and uncontrollably. System Failures occur less frequently compared to Transaction Failures, but take a much longer time for the DBMS to recover. The database needs to pinpoint time of failure and what changes the DBMS failed to record. Media Failures~\cite{sauer17} happen when the underlying storage device of a DBMS fails (e.g., disk head crash, bad sectors). This type of failure causes permanent data loss to the DBMS. The only way for a DBMS to recover from Media Failures is to restore from a secondary backup storage.
 
-One of such components is the recovery system. Since the execution engine has adapted to executing compiled native code, the DBMS needs to implement an additional execution engine to interpret the log records. Instead, we propose a system design that will extend the query execution engine to create custom programs for replaying log records.
+To handle different types of failures, a DBMS needs to develop a recovery system that will restart the database correctly in case of failure. A widely adopted recovery system is to combine write-ahead logging during transaction execution with crash recovery that uses redo (install changes to the database) and undo (remove changes from the database) processes, represented by ARIES\cite{malviya14}. The ARIES (Algorithm for Recovery and Isolation Exploiting Semantics)~\cite{aries} protocol is a recovery method developed by IBM in the 1990s. It guarantees database integrity in the fact of Transaction, System and Media Failures~\cite{aries}. In ARIES, the DBMS records transaction modifications in durable log records before the DBMS propagates changes to a database page to disk. During crash recovery, the DBMS applies changes from the log records to the database with redo and undo processes (i.e., log replay) ~\cite{franklin97}.
+
+However, the original ARIES paper focused on disk-based DBMSs. Recently, we have seen a rapidly increasing number of in-memory DBMSs due to technological advancement in semiconductor memory~\cite{gar92}. Many in-memory DBMSs avoid strictly adhering to the ARIES protocol for recovery. This is due to the fact that a lot of the concepts in ARIES no longer apply to in-memory DBMSs. For instance, ARIES uses undo records to revert changes that have been applied to the database. However, undo records are excessive for many in-memory DBMS recovery systems~\cite{noisepage, malviya14, hekaton2013, scuba14, silo_r}. Performance concerns is another reason why in-memory DBMSs stray from the ARIES protocol. Logging requires the DBMS to interact with the disk. Therefore, logging I/O is a major bottleneck for an in-memory DBMS. This prompts in-memory DBMSs to minimize logging traffic~\cite{faeber17}. An example is the recovery of database indexes~\cite{faeber17}. Disk-based DBMSs log updates to index structures (e.g., B+ Tree) that allow faster recovery during log replay~\cite{aries}. In comparison, in-memory DBMSs do not log index updates~\cite{hekaton2013, noisepage, malviya14, silo_r} and choose to reconstruct indexes from scratch during log replay. Despite the differences, many in-memory DBMSs still use some form of logging~\cite{noisepage, malviya14, hekaton2013, silo_r} in their recovery systems.
+
+In addition to changes in recovery systems, in-memory DBMSs adopt various optimization algorithms for their execution engines\cite{kersten18}. These optimizations aim to increase execution throughput by reducing either the number of instructions that a DBMS executes to run a query, or the clock cycles per instruction (CPI)~\cite{boncz05}. Query compilation/code generation is an important optimization technique used by DBMSs to greatly reduce the number of instructions that the CPU needs to execute\cite{kersten18}. During execution, the DBMS breaks down a query into various tasks~\cite{noisepage, neumann11}. To speed up the execution of those tasks, the DBMS can compile them into native code (e.g., C/C++) with an off-shelf compiler\cite{boncz05}. Query compilation leads to faster query execution because it specializes both the data structures (e.g., hash table) and access methods of a DBMS towards execution efficiency~\cite{neumann11}. Moreover, the compiled code can be optimized around locality that increases the chance of a data tuple being propagated between operators in CPU registers\cite{menon17}.
+
+While query compilation succeeds in increasing the execution throughput of a DBMS, it comes with several drawbacks. Implementing a query compilation system requires additional knowledge of compiler systems (e.g., LLVM) and huge amounts of engineering work to translate different execution tasks\cite{kersten18}. The DBMS also generates low-level machine code that is hard to understand and debug~\cite{kersten18}.
+
+Moreover, the DBMS recovery system is isolated from the query compilation execution engine (i.e., a component of a DBMS that is responsible for execution). Most of the query compilation DBMSs we have surveyed~\cite{noisepage, neumann11, paroski16, craig14} have no conduits between their recovery systems and execution pipelines. The recovery system implements its own functionalities to update the database, but some of these functionalities already exist in the execution engine. For instance, we mentioned that in-memory DBMSs rebuild the indexes during log replay. When a redo process install changes on a table, it also retrieves the indexes on that table and update them (index update). However, the execution engine has already implemented this index update functionality. As a result, the DBMS contains two implementations that provide identical functionalities. Similar reasoning applies to other functionalities (e.g., constraint checking, trigger events) that may be used during log replay. The number of those functionalities in the recovery system will eventually amount to the scale of a separate execution engine that is built specifically for log replay.
+
+Therefore, if we can find a way to unify a DBMS's recovery system and execution engine, we can drastically reduce engineering overhead. Furthermore, we believe this unification also increases replay efficiency. Unless the rewritten functionalities in the recovery manager are executed as native machine code, they will be less efficient compared to those in the execution engine that uses query compilation. Therefore, if the DBMS allows the recovery system to invoke functionalities within the execution engine, the log replay process should be more efficient.
+
+\section{Contribution}
+We present a system design that will extend the execution engine to create custom programs for replaying physical log records. Our design converts log records into a format that the DBMS can compile into native code to be accepted by the execution engine. We will show that our approach removes the need for introducing extra implementations into the recovery system for functionalities that already exist in the execution engine. We will also verify our assumption that by utilizing the code generation execution engine, the DBMS will have increased log replay efficiency.
+
+We implement our approach in NoisePage\cite{noisepage}, a self-driving in-memory DBMS developed at Carnegie Mellon University. NoisePage is built in C++ and uses the PostgreSQL wire protocol for user communication. The DBMS also depends on query compilation for its execution engine. Our experimental results show that while the code generation recovery approach falls short of recovery throughput compared to baseline recovery, it is more efficient in certain areas (e.g., index maintenance, table constraints) and has higher scalabiltiy for a table with a larger number of columns.
+
+We structure the remainder of the thesis as follows. In Chapter 2, we provide more background information on database recovery, code generation, and motivations behind our approach. In Chapter 3, we present the recovery and code generation architecture in NoisePage and how we implemented our approach in this DBMS. In Chapter 4, we evaluate our implementation by comparing it against NoisePage's builtin recovery system. We discuss related works in Chapter 5 and conclude our thesis in Chapter 6.
 
 \chapter{Background}
+In this chapter, we discuss more background information on database recovery and code generation. We then explain how the two components interact within a DBMS and what changes need to be made for them to cooperate.
+
+\section{Transactions}
+Transactions are the atomic operations of any DBMSs~\cite{theo83}. They appear throughout a DBMS, including the recovery system and the execution engine responsible for code generation. A transaction is a sequence of interactions with the database. These interactions can be retrieving data, inserting data, removing data, etc. 
+
 \section{Database Recovery}
-\begin{figure}[H]
+A DBMS ensures database integrity by satisfying the following conditions:
+\begin{itemize}
+    \item \textbf{Durability of Updates}~\cite{agrawal89}: All the changes made by committed transactions are durable.
+    \item \textbf{Failure Atomicity}~\cite{franklin97}: None of the changes made by aborted or failed transactions are persisted visible after recovery.
+\end{itemize}
+
+Many DBMSs~\cite{noisepage, malviya14, hekaton2013, silo_r, azure, postgres, mysql} combine logging and recovery protocols to preserve these two conditions in case of failure. Logging is the action of storing information about committed transactions on disk, while recovery is the action of restoring the database system into a consistent state.
+
+The DBMS stores logging information in a special data structure called a log record. A log record contains physical changes (e.g., changes made to a specific physical address) performed on the DBMS, or higher-level information (e.g., user-input query). In write-ahead logging \cite{aries}, the DBMS records physical database changes in a log file before the DBMS persists the changes on disk. A transaction is not allowed to commit until the DBMS persists its corresponding log record.
+
+For disk-based DBMSs, a log record in the log file can be either a redo record or an undo record~\cite{aries}. During recovery, a redo record installs the effects of committed transactions, while an undo record removes the effects on incomplete or aborted transactions. In-memory DBMSs, on the other hand, do not persist uncommitted changes on disk~\cite{noisepage, malviya14, hekaton2013, scuba14, silo_r}. This is because disk-based DBMSs generate dirty pages. These are pieces of modified entries in the database that reside in the memory, but have not yet been persisted to disk by the DBMS. However, in-memory DBMSs do not write dirty data to persistent storage~\cite{noisepage, malviya14, hekaton2013, scuba14, silo_r}. Therefore, in-memory DBMSs do not generate dirty pages, nor do they need to keep undo records. As a result, undo records are no longer required for their recovery systems. Moreover, in-memory DBMSs do not need to generate log records for indexes~\cite{faeber17}. During recovery, the DBMS reconstructs the database with redo records reconstructs and create the indexes simultaneously~\cite{malviya14, hekaton2013}. For each redo record, the recovery system finds the table that it modified, then retrieves all of its indexes from the database catalog ((\cref{fig:recovery_index_update}). Finally, for each index, the recovery system either updates it with new values, or remove entries from the index. 
+
+\begin{figure}[t!]
 \centering
-\includegraphics[width=0.9\textwidth]{images/Logging.png}
-\caption{Write Ahead Logging.}
-\label{fig:logging}
+\centering
+\includegraphics[width=0.9\textwidth]{images/RecoverIndex.png}
+\caption{Index Update During Recovery.}
+ \label{fig:recovery_index_update}
 \end{figure}
-Database recovery systems are responsible for preserving the ACID principles of a DBMS in case of failure. Prior to 1980s, early recovery systems rely heavily on non-volatile memory storage. Most of the DBMSs were disk-based and the recovery protocols assume the existence of dirty pages. System R\cite{system_r}, for instance, creates shadow copy of updated pages and maintains log record updates. Nowadays, both the capacity and reliability of main memory have increased significantly. This greatly improved the capabilities of in-memory DBMSs, but their performance is still be threatened by the need to synchronize non-volatile memory with persistent storage. Modern recovery systems aim to reduce the synchronization overhead.
 
-Recovery systems consist of two components: logging and recovery. Logging is the action of storing transactional information on disk. These information are stored in a special data structure called a log record. A log record can either contain physical information (e.g. changes made to a specific physical address) or higher-level information (e.g. user-input query). In Write-ahead logging \cite{aries}, the DBMS records database changes in a log file before the changes can be persisted on disk. Each log record in the log file usually consists of redo records (install the effects of a committed transaction) and undo records (remove the effects on an incomplete or aborted transaction). Since in-memory DBMSs do not persist uncommitted changes, undo records are no longer required for the recovery system.
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.9\textwidth]{images/RecoveryCheckpoint.png}
+\caption{Recovery with Log Records and Checkpoints.}
+\label{fig:recovery_checkpoint}
+\end{figure}
 
-Recovery is the action of restoring the database system into a consistent state. If available, the DBMS first attempts to restore its previously recorded checkpoint. The database then initiates the log replay process to go through every log record stored since that checkpoint. SiloR\cite{silo_r} uses physical logging, checkpoints and an epoch-based recovery system. Transactions are assigned with different epochs and can only be persisted when their epochs are smaller then the current persistent epoch. VoltDB\cite{malviya14} uses a form of physiological logging that reduces transaction execution overhead. SAP HANA\cite{lee18}, however, uses a log-less approach through parallel table replication.
+Aside from logs, recovery systems can store complete snapshots (i.e., checkpoints) of the database. The DBMS can decide to take checkpoints based on a certain rule (e.g., timed-interval, number of transactions). Checkpoints reduce the time required for the database to recover. The DBMS can directly revert to a previous snapshot without replaying any log records before that snapshot. DBMSs often store both log records and checkpoints. During recovery, the DBMS finds its most recent snapshot, then replays any log records that are stored after that snapshot (\cref{fig:recovery_checkpoint}).
 
 \section{Query Compilation / Code Generation}
-When a query arrives, the DBMS parses the query into an expression tree. Eventually, the optimizer of the DBMS converts the expression tree into a physical plan tree. The physical plan represents how the query will be executed. It usually consists of operators that specify physical operations on the DBMS (e.g. inserting values into a certain memory location). For instance, \dbSQL{UPDATE x SET col1 = -col1 WHERE col1 BETWEEN 0 AND 100} can be represented by an update plan tree with a sequential plan as a child. The execution engine then uses the plan tree for execution.
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.5\textwidth]{images/PhysicalPlanExample.png}
+\caption{Physical Plan that corresponds to \dbSQL{UPDATE x SET col1 = -col1 WHERE col1 BETWEEN 0 AND 100}.}
+\label{fig:physical_plan_example}
+\end{figure}
+When a query arrives, the DBMS parses the query into an abstract syntax tree (AST). The optimizer of the DBMS then converts the AST into a physical plan tree. The physical plan represents how the DBMS will execute the query. It consists of operators that specify physical operations on the DBMS (e.g., inserting values into a certain memory location). For instance, \dbSQL{UPDATE x SET col1 = -col1 WHERE col1 BETWEEN 0 AND 100} can be represented by an update plan tree with a sequential plan as a child (\cref{fig:physical_plan_example}). The execution engine then uses the plan tree for execution.
 
-The Iterator model\cite{volcano} is widely used in many disk-based DBMS (e.g. ORACLE RDBMS, MySQL, Microsft SQL Server) to interpret plan trees. The model "iterates" over each operator by implementing a \dbSQL{next()} function in each operator that returns the next tuples to be operated. The expressions inside the operators are evaluated using the provided tuples and generates output tuples. This approach suffers from frequent virtual function calls for in-memory DBMS. The Materialization model reduces this overhead by processing all the input tuples and emitting all the outputs at once ("materializing" the result as a single row or column). The Materialization model is suitable for OLTP DBMS since each OLTP query only accesses a small number of tuples at a time. However, since the Materialization results are stored in an in-memory buffer, the execution throughput is then bound by the size of the available memory space. While disk-based DBMSs are less concerned about the in-memory access since most of their operations are disk-based, this is especially critical for in-memory DBMSs.
+In a DBMS that uses query interpretation, its execution engine (i.e., a component of a DBMS that is responsible for execution) processes the physical plan by traversing the plan tree. Therefore, for every query, DBMS needs to follow pointers and resolve branching conditions (e.g., if, switch statements). This incurs overhead caused from virtual function calls, branch mispredictions and instruction cache misses.
 
-Vectorization and Query Compilation are two state-of-the-art techniques employed for in-memory DBMSs to reduce memory overhead\cite{kersten18}. The Vectorization model is a variant of the Iterator model. Instead of emitting a single tuple at a time, the Vectorization model emits a batch of tuples at a time to amortize the cost of memory access. The functions that operate on these tuples are also specialized to be able to take in a batch of tuples at a time and more efficient compared to iterating over a single tuple at a time.
-
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/QueryCompilation.png}
-\caption{Query Compilation architecture.}
+\caption{Query Compilation Architecture.}
 \label{fig:query_compilation}
 \end{figure}
 
-Query Compilation eliminates the cost of interpretation by compiling the physical plan to machine code. The machine code of the corresponding physical plan can then be executed repeatedly by the execution engine, removing any need for virtual function calls. Before being compiled to machine code, the physical plan is often first converted into an intermediate representation (e.g. C/C++ code, LLVM IR, or custom Domain Specific Language) that follows the grammar of an imperative language. This simplifies the process of converting the physical plan into machine code, as the intermediate representation form is designed to resembles closely to SQL statements. 
+Query compilation eliminates the cost of query interpretation by compiling the physical plan to machine code that is specific for that query. The machine code of the corresponding physical plan can then be executed repeatedly by the execution engine, removing any need for virtual function calls and branching resolutions. Generally, there are two ways of compiling queries. In the first approach, the DBMS creates source code that is compiled into native code with an external compiler (e.g., gcc) ~\cite{krikellas10, klonatos14}. This approach is used in Amazon Redshift and pre-2016 MemSQL~\cite{paroski16}. In the second approach, the DBMS first converts physical plan into an intermediate representation (e.g., LLVM) that follows the grammar of an imperative language. This approach simplifies the process of converting the physical plan into machine code, as the intermediate representation form is designed to resemble SQL statements. Moreover, it removes the need for the DBMS to use the compiler as an external process. This approach is adopted by NoisePage~\cite{menon17}, Hyper~\cite{neumann11}, Hekaton~\cite{craig14}, and SingleStore~\cite{paroski16}.
 
-Hyper\cite{neumann11} is one of the pioneers of query compilation. It uses a data-centric compilation approach that splits the query plan into pipelines and compiles each pipeline separately. Vectorwise\cite{raducanu13} chooses to pre-compile huge amounts of micro function primitives that perform simple operations on typed data. During runtime, the DBMS can directly invoke these compiled primitives for query execution.
+\section{Motivation}
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.9\textwidth]{images/Motivation.png}
+\caption{Possible ways to integrate a physical logging system with code generation.}
+\label{fig:motivation}
+\end{figure}
+While code generation is a powerful optimization technique, it poses design challenges for the recovery system. Both the execution engine and physical log records perform identical physical operations on a database table. The native code generated through query compilation operates directly on physical tables. For physical log records, they are already designed as a data structure that represents physical changes made to the database. During recovery, the DBMS simply replays those changes on the table.
+
+However, the recovery system has no means of reusing functions within the execution engine to install physical changes from log records. The execution engine does not accept physical log records because it follows along the query compilation pipeline. This pipeline transforms one logical representation of a query to another, until the query becomes native code. There is no place for physical log records to exist within this transformation pipeline.
+
+There are two solutions to this problem. One solution is to re-implement functions to install physical changes on data tables within the recovery system. However, this approach completely isolates the recovery system from the execution engine. This means that if the recovery system wishes to use a functionality within the execution engine, it has to rewrite that same functionality within the recovery system (\cref{fig:problem}).
+
+The other solution is to integrate physical logging with the execution engine. \cref{fig:motivation} shows four possible paths that allow the execution engine to accept physical log records. Converting the log record directly into native code requires the implementation of a new compiling framework, which makes this option infeasible. Therefore, the closest point where the log records can reach before entering the execution engine is physical plans. We then reach the conclusion to convert log records into physical plans. Firstly, compared to raw queries or abstract syntax trees, physical plans are closer to the end of the query compilation pipeline. If we convert a log record into an abstract syntax tree (AST), the DBMS still needs to do additional work to convert the AST into a physical plan. Secondly, we will show in later sections that it is enough for physical plans to represent contents of a log record.
+
+If the DBMS can convert log records into physical plans, the recovery system can rely on code generation for recovery operation. This code generation recovery approach brings around several benefits. Firstly, it significantly reduces engineering overhead. Compiling contents of the log records into machine code allows the recovery system to seamlessly integrate with the built-in execution engine. We have explained in Section 2.1 that the recovery system needs to perform extra operations (e.g. index updates, constraint checking in \cref{fig:problem}) besides updates to the data tables. These functionalities exist within the execution engine. If we allow the recovery system to reuse existing functionalities by communicating with the execution engine through native code, then the recovery system no longer needs to implement its own functionalities. Secondly, utilizing the code generation execution engine provides more efficient functionalities. A function implemented by the recovery system will not be as efficient as one that exists in the execution engine.
+
+These potential benefits motivate us to design a code generation recovery system based on conversion from log records to physical plans. In the next chapter, we will present the implementation of our approachhbmmn .
 
 \chapter{Method}
-\begin{figure}[H]
+\afterpage{%
+\begin{figure}[t!]
 \centering
-\includegraphics[width=0.9\textwidth]{images/Proposal.png}
+\includegraphics[width=0.9\textwidth]{images/Method.png}
 \caption{Code Generation Recovery Mechanism.}
 \label{fig:codegen_recovery}
-\end{figure}
+\end{figure}}
 
-Our proposal is to extend the recovery layer and query compilation layer to support the interpretation of log records. This approach can be realized in three steps:
+We now describe how to extend the recovery system and query compilation pipeline to support log replay with code generation. Our implementation follows along the third option shown in \cref{fig:motivation}. We first enable the recovery system to convert log records into compiled native code. To achieve this, the DBMS needs to interpret the log records into physical plans and prepare them for compilation. We then need to make minor modifications to the execution engine, so it will be able to correctly execute the native code generated by the recovery system. We further summarize our approach (\cref{fig:codegen_recovery}) in three steps:
 
 \begin{enumerate}
-\item Extract information from log records.
-\item Convert the information into expressions that can be accepted and compiled by the code generation engine (Code Generation Step).
+\item Interpret and extract contents from log records.
+\item Convert the extracted contents into physical plans that can be compiled into native code (Code Generation).
 \item Run the compiled machine code using the execution engine.
 \end{enumerate}
-
-This code generation approach brings around several benefits. Firstly, it significantly reduces engineering overhead. Compiling contents of the log records into machine code allows the recovery manager to seamlessly integrate with the built-in execution engine. This removes the need to specifically construct code to handle tasks that are not compiled to machine code.
-
-\begin{figure}[H]
-\centering
-\begin{subfigure}{.5\textwidth}
- \centering
- \includegraphics[width=0.9\textwidth]{images/RecoverIndex.png}
- \caption{Index Update During Recovery.}
-  \label{fig:pipeline_graph}
-\end{subfigure}%
-\begin{subfigure}{.5\textwidth}
- \centering
- \includegraphics[width=0.9\textwidth]{images/RecoverConstraint.png}
- \caption{Constraint Checking During Recovery.}
-  \label{fig:pipeline_code}
-\end{subfigure}
-\caption{Problems faced by conventional recovery in code generation DBMS.}
-\label{fig:log_record}
-\end{figure}
-
-Secondly, it also resolves tricky problems that will appear when writing specialized code for log records. An example of this is index updates. Without code generation, the recovery manager needs to specifically reconstruct the index given an insert or update record. With code generation, the index updates are taken care directly by the execution engine that already contains high-performance specialized code for index maintenance. Similar problems, such as constraint checking
-
-Our proposed architecture is implemented and tested in \textit{Noisepage} \cite{noisepage}, a self-driving in-memory DBMS developed at Carnegie Mellon University. Noisepage is built in C++ and uses the PostgreSQL wire protocol for user communication. The DBMS supports ACID transactions and \texttt{SNAPSHOT-ISOLATION}. Noisepage uses the conventional WAL recovery scheme with physical logging and depends on query compilation for query execution. We will dive into the details of Noisepage's recovery structure in the following sections.
+We implement our approach in NoisePage~\cite{noisepage}. Noisepage depends on a recovery system that uses physical logging schemes. It also adopts query compilation optimization for its execution engine.
 
 \section{Recovery System Architecture}
-\subsection{Transaction}
-Transactions are the atomic operations of any DBMS. Noisepage uses a transaction to perform physical updates on the database and physical logging to disk. Noisepage uses a multi-versioned delta store transaction engine that ensures \texttt{SNAPSHOT-ISOLATION}. The transaction engine allows non-blocking reads over writes and vice versa, but does not allow write-write conflicts on a per tuple basis. A transaction's lifecycle begins when the transaction begins, and ends after the log manager has serialized its changes to disk.
+ To show how we will extend the recovery system, we first present some background information on the recovery system architecture of NoisePage. NoisePage's recovery system consists of three major components: Transaction Manager, Logging Manager, and Recovery Manager. Both the Logging Manager and the Recovery Manager interact with the Transaction Manager to achieve logging and recovery respectively. We will first give an overview of NoisePage's transaction manager, 
 
-Each data tuple in noisepage is uniquely identified through a tuple slot that stores the offset of a tuple. When the DBMS inserts a tuple into a table, it creates a new tuple slot that points to a memory location within the table. Subsequent updates to the tuple does not create direct copies of the tuple, but stores delta information (redo records) about the updates instead. These redo records are essential for executing log replay correctly. The structure of a redo record is shown later in \ref{fig:log_record}.
+\subsection{Transaction Manager}
+The Transaction Manager is responsible for creating and maintaining database transactions. NoisePage uses a transaction to perform physical updates on the database and physical logging to disk. NoisePage uses a multi-versioned delta store Transaction Manager that ensures \texttt{SNAPSHOT-ISOLATION}. The Transaction Manager allows non-blocking reads over writes and vice versa, but does not allow write-write conflicts on a per tuple basis. A transaction's lifecycle begins when the transaction begins, and ends after the log manager has serialized its changes to disk.
 
-A transaction uses a buffer (redo buffer) that stores all the delta records that will appear in its lifetime. Each redo buffer has a fixed size of 4096 bytes and is allocated from a centralized buffer pool. Each time a transaction needs to change the contents of the DBMS, it will attempt to request space from the redo buffer to dump a corresponding delta record of the change. If the redo buffer runs out of space, the transaction will replace the current buffer with a new buffer from the buffer pool. The redo buffer allows the logging components to process the changes before the transaction is completed.
+Each data tuple in NoisePage is uniquely identified through a tuple slot that stores the offset of a tuple. When the DBMS inserts a tuple into a table, it creates a new tuple slot that points to a memory location within the table. Subsequent updates to the tuple does not create direct copies of the tuple, but stores delta information (redo records) about the updates instead. These redo records are essential for executing log replay correctly. The structure of a redo record is shown later in \cref{fig:log_record}.
 
-When a transaction commits, the transaction engine creates a commit record that contains a timestamp that refers to the oldest active transaction from the timestamp manager. The commit record is appended to the redo buffer. The redo buffer is then carried over to the log manager, where the changes will be serialized to disk. When a transaction aborts, the transaction creates an abort record that will prevent corresponding records to be replayed during recovery. Abort records are essential; since the redo buffer is persisted to disk by the log manager once it is full, it is possible for aborted transactions to persist on disk. Aborted transactions that are persisted on disk are rare, however, since it would be difficult for a typical OLTP transaction to fill up the entire redo buffer.
+A transaction uses a buffer (redo buffer) that stores all the delta records that will appear in its lifetime. Each redo buffer has a fixed size and is allocated from a centralized memory pool. Each time a transaction needs to change the contents of the DBMS, it will attempt to request space from the redo buffer to dump a corresponding delta record of the change. If the redo buffer runs out of space, the transaction will replace the current buffer with a new buffer from the memory pool. The redo buffer allows the logging components to process the changes before the transaction is completed.
 
-\subsection{Write-Ahead Logging}
-\begin{figure}[H]
+When a transaction commits, the Transaction Manager creates a commit record that contains a timestamp that refers to the oldest active transaction from the timestamp manager. The commit record is appended to the redo buffer. The redo buffer is then carried over to the log manager, where the changes will be serialized to disk. When a transaction aborts, the transaction creates an abort record that will prevent corresponding records to be replayed during recovery. Abort records are essential; since the redo buffer is persisted to disk by the log manager once it is full, it is possible for aborted transactions to persist on disk. Aborted transactions that are persisted on disk are rare, however, since it would be difficult for a typical OLTP transaction to fill up the entire redo buffer.
+
+\subsection{Log Manager}
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/WAL.png}
-\caption{\textbf{Logging Architecture}. Log manager uses the log serializer and log consumers to convert redo buffers into log records.}
-\label{fig:wal}
+\caption{\textbf{Log Manager}.}
+\label{fig:log_manager}
 \end{figure}
 
-The log manager is responsible for performing write-ahead logging in Noisepage. All the changes are serialized to disk as logs before they are performed on the DBMS storage. Each log record is self-contained and does not require any additional metadata to be replayed. The log manager consists of two separate tasks that live in different threads: the Log Serializer tasks and the Log Consumer tasks.
+The Log Manager (\cref{fig:log_manager}) is responsible for performing write-ahead logging in NoisePage. All the changes are serialized to disk as logs before they are performed on the DBMS storage. Each log record is self-contained and does not require any additional metadata to be replayed. The Log Manager consists of two separate tasks that live in different threads: the Log Serializer tasks and the Log Consumer tasks.
 
 \subsubsection{Log Serializer}
-The log serializer task receives redo buffers from a transaction once it is full, or when the transaction decides to commit. The log serializer breaks down the redo buffers into raw memory segmented into fixed-size buffers of 4096 bytes. These buffers will be consumed by the Disk Log Consumer for persistence.
+The Log Serializer task receives redo buffers from a transaction once it is full, or when the transaction decides to commit. The Log Serializer breaks down the redo buffers into raw memory segmented into fixed-size buffers. These buffers will be consumed by the Log Consumer for persistence.
 
-The log records must be serialized in the correct order for recovery to perform correctly. Different transactions can share a same redo buffer that is filled with each of their own log records. Moreover, it is possible for transactions to appear in a non-serial order relative to their begin timestamp. However, the log records performed by an individual transaction is guaranteed to appear in the same order as they were created. This property helps ensure \texttt{SNAPSHOT-ISOLATION} property of Noisepage during log replay.
+The log records must be serialized in the correct order for recovery to perform correctly. Different transactions can share a same redo buffer that is filled with each of their own log records. Moreover, it is possible for transactions to appear in a non-serial order relative to their begin timestamp. However, the log records performed by an individual transaction is guaranteed to appear in the same order as they were created. This property helps ensure \texttt{SNAPSHOT-ISOLATION} property of NoisePage during log replay.
 \subsubsection{Log Consumer}
-Buffers supplied by the log serializer can be consumed by different log consumer tasks. Each log consumer is given a copy of the original buffer to achieve parallelism. Noisepage uses two type of log consumers: disk log consumer and replication log consumer.
+Buffers supplied by the log serializer can be consumed by different Log Consumer tasks. Each Log Consumer is given a copy of the original buffer to achieve parallelism. NoisePage uses two type of log consumers: Disk Log Consumer and Replication Log Consumer.
 
-The disk log consumer repeatedly polls for new buffers from the log serializer and writes the changes to disk. To improve performance, disk log consumer uses group commit that allows a batch of changes to be committed over a time period specified by the user. Under default settings, the disk log consumer writes down changes every 10 microseconds of if more than 1 MB of data has been written since the last write.
+The Disk Log Consumer repeatedly polls for new buffers from the log serializer and writes the changes to disk. To improve performance, disk log consumer uses group commit that allows a batch of changes to be committed over a time period specified by the user. Under default settings, the disk log consumer writes down changes every 10 microseconds of if more than 1 MB of data has been written since the last write.
 
-The replication log consumer also polls for new buffers, but instead of persisting them to disk, sends the new buffers over across the network to database replicas.
+The Replication Log Consumer also polls for new buffers. Instead of persisting them to disk, it sends the new buffers over across the network to database replicas.
 
-\subsection{Log Replay}
-\begin{figure}[H]
+\subsection{Recovery Manager}
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/RecoveryManager.png}
-\caption{How recovery operates in Noisepage.}
-\label{fig:recoverymanager}
+\caption{Recovery Manager.}
+\label{fig:recovery_manager}
 \end{figure}
 
-Noisepage uses four different record types: \textit{Redo, Delete, Commit, Abort}. Redo and Delete records are not processed immediately. Instead, they are placed inside a deferred changes buffer, ordered by their transaction timestamp. An Abort record removes the corresponding Redo/Delete record from the buffered changes. A Commit record initiates a transaction to iterate over the deferred changes buffer. Once all the deferred changes are processed, the buffer is cleared and the transaction is committed. The transaction aborts if any log record is malformed or any recovery operation fails.
+\cref{fig:recovery_manager} shows the architecture of the Recovery Manager that is responsible for log replay. NoisePage uses four different record types: redo, delete, commit, abort. Redo and delete records are not processed immediately. Instead, they are placed inside a deferred changes buffer, ordered by their transaction timestamp. An abort record removes the corresponding redo/delete record from the buffered changes. A commit record initiates a transaction to iterate over the deferred changes buffer. Once all the deferred changes are processed, the buffer is cleared and the transaction is committed. The transaction aborts if any log record is malformed or any replay fails.
 
-\subsubsection{Data Structure}
-\begin{figure}[H]
+\subsubsection{Log Record}
+\begin{figure}[t!]
 \centering
 \begin{subfigure}{.5\textwidth}
  \centering
@@ -271,272 +315,484 @@ Noisepage uses four different record types: \textit{Redo, Delete, Commit, Abort}
  \caption{Delete Record Structure.}
   \label{fig:pipeline_code}
 \end{subfigure}
-\caption{The internal log structures.}
+\caption{Log Record.}
 \label{fig:log_record}
 \end{figure}
 
-A physical log record consists of a header followed by a record body. The header stores metadata about the log record itself, including its record type, size and begin timestamp of the transaction that generated the log record as mentioned in Section 3.1.1. The record body contains physical information that is necessary for recovery and varies depending on the record type. Depending on the value type, the values may bee stored in-line or not in-inline. Simple types such as \texttt{INTEGER}, \texttt{FLOAT} can be stored in-line, while \texttt{VARLEN} entry may stores the pointer in the values column that points to another location in the record.
+A physical log record consists of a header followed by a record body (\cref{fig:log_record}). The header stores metadata about the log record itself, including its record type, size and begin timestamp of the transaction that generated the log record as mentioned in Section 3.1.1. The record body contains physical information that is necessary for recovery and varies depending on the record type. Depending on the value type, the values may bee stored in-line or not in-inline. Simple types such as \texttt{INTEGER}, \texttt{FLOAT} can be stored in-line, while \texttt{VARLEN} entry may store a pointer in the values column that points to another physical location in the record.
 
-Tuple slots in the log records will no longer be valid memory locations during recovery. Instead, the recovery manager creates an internal mapping from original tuple slots to a new tuple slots that will be retrieved after new values are inserted. The mapping allows the recovery manager to apply changes to the correct memory locations in the new memory environment.
+Tuple slots in the log records will no longer be valid memory locations during recovery. Instead, the Recovery Manager creates an internal mapping from original tuple slots to a new tuple slots that will be retrieved after new values are inserted. The mapping allows the Recovery Manager to apply changes to the correct memory locations in the new memory environment.
 
-Since only Redo and Delete records will effectively modify physical storage, we only need to analyze the record body of those two record types. Modifications of a query to the DBMS can be resolved down to the modification of tuple slots on the physical level.
+Since only redo and delete records will effectively modify physical storage, we only need to analyze the record body of those two record types. Modifications of a query to the DBMS can be resolved down to the modification of tuple slots on the physical level.
 
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/Delta.png}
-\caption{Redo Record Delta.}
-\label{fig:logging}
+\caption{Redo Record Projected Row.}
+\label{fig:projected_row}
 \end{figure}
 
- While storing tuple slots is sufficient for delete records, Redo Records require additional data to perform Recovery Insert and Update operations. These data are kept in the Record Delta, which stores a mapping from column ids to values.
+ While storing tuple slots is sufficient for delete records, redo records require additional data to perform log replay. These data are kept in the record projected row (\cref{fig:projected_row}), which stores a mapping from column ids to values. The DBMS retrieves individual values by computing offsets.
 
-\subsubsection{Recovery Operation}
-A Noisepage recovery step has three different operations:
+\subsubsection{Replay Step}
+A replay step refers to the recovery manager replaying a single redo record or delete record. A NoisePage replay step has three different scenarios:
 \begin{itemize}
-    \item \textbf{Insert}: Represented by a Redo Record. The recovery manager inserts the values stored within the redo record into the given tuple slot and updates the indexes.
-    \item \textbf{Delete}: Represented by a Delete Record. The recovery manager deletes the tuple slot specified by the delete record and updates the indexes.
-    \item \textbf{Update}: Represented by a Redo Record. The recovery manager updates the tuple slot using the values within the redo record and updates the indexes.
+    \item \textbf{Insert Replay}: The Recovery Manager inserts the values stored within a redo record into the given tuple slot and updates the indexes.
+    \item \textbf{Delete Replay}: The Recovery Manager deletes the tuple slot specified by a delete record and updates the indexes.
+    \item \textbf{Update Replay}: The Recovery Manager updates the tuple slot using the values within a redo record and updates the indexes.
 \end{itemize}
 
-While both Insert and Update are represented using the same Redo Record structure, they can be differentiated by keeping track of all the tuple slots found in log records. If a tuple slot inside a Redo Record is unseen before, then the Redo Record represents an Insert operation. Otherwise, the Redo Record represents an Update operation.
+While both insert and update redo records are represented using the same redo record structure, they can be differentiated by keeping track of all the tuple slots found in log records. If a tuple slot inside a redo record is unseen before, then the redo record represents an Insert operation. Otherwise, the Redo Record represents an Update operation.
 
 \section{Recovery Code Generation}
-The code generation structure in Noisepage follows from the data-centric compilation approach in \cite{neumann11}, as seen in \ref{fig:query_compilation}. A query is interpreted, optimized and converted into a physical plan tree. A plan tree consists of plan nodes and specifies how the query should be executed on the physical level of the database. 
+The code generation structure in NoisePage follows from the data-centric compilation approach in \cite{neumann11}, as seen in \cref{fig:query_compilation}. A query is interpreted, optimized and converted into a physical plan tree. A plan tree consists of plan nodes and specifies how the query should be executed on the physical level of the database. 
 
-A physical plan tree/node is then converted into an operator pipeline through a plan translator. Each plan translator correspond to a plan node in the original plan tree. A pipeline contains an ordered collection of relational operators that are not yet materialized, ended with a pipeline breaker (e.g. sort tuples, creating a hash table). The pipeline is only materialized whenever a pipeline breaker has been encountered.
+A plan translator then converts a physical plan tree/node into an operator pipeline. Each plan translator correspond to a plan node in the original plan tree. A pipeline contains an ordered collection of relational operators that are not yet materialized, ended with a pipeline breaker (e.g., sort tuples, creating a hash table). The pipeline is only materialized whenever a pipeline breaker has been encountered.
 
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/LLVM.png}
 \caption{Lifecycle of a TPL code fragment. Execution can run in either interpret or compile mode.}
 \label{fig:llvm}
 \end{figure}
-Noisepage then compiles each operator pipeline into a domain-specific language referred to as TPL. Each function of a query inside the TPL code is then compiled to bytecode called TBC. TBC can be interpreted by a built-in virtual machine, or further compiled into an LLVM module. The execution engine can either interpret TBC, or run the compiled LLVM module.
+NoisePage then compiles each operator pipeline into a customized imperative language referred to as (TPL). The DBMS then compiles each function of a query inside the TPL code into some bytecode (TBC). The bytecode can be interpreted by a built-in virtual machine, or further compiled into an LLVM module. The execution engine can either interpret TBC, or run the compiled LLVM module (\cref{fig:llvm}).
 
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/CodegenExample.png}
 \caption{Code Generation of \dbSQL{DELETE FROM x WHERE col BETWEEN a AND b}}
 \label{fig:codegen_example}
 \end{figure}
 
-We further demonstrate the process of query compilation through the example in \ref{fig:codegen_example}. To run the query \dbSQL{DELETE FROM x WHERE col BETWEEN a AND b}, the DBMS needs to first do a sequential scan to find out the columns, and then do a delete operation on the found columns. These two steps are manifested in the delete plan node that includes a sequential scan plan node as a child. The plan node is translated into an operator pipeline that specifies how each operation will be exactly executed in the DBMS. The operator pipeline is then converted to TPL code. Each function inside the TPL code correspond to a piece of function inside the execution engine that will be evetually invoked once the compiled native code is run. For instance, \texttt{@tableDelete} corresponds to a C++ function \texttt{OpStorageInterfaceTableDelete} (a delete operation on a tuple slot of a table) in the execution engine.
+We further demonstrate the process of query compilation through the example in \cref{fig:codegen_example}. To run the query \dbSQL{DELETE FROM x WHERE col BETWEEN a AND b}, the DBMS needs to first do a sequential scan to find out the columns, then do a delete operation on the found columns. These two steps are manifested in the delete plan node that includes a sequential scan plan node as a child. The plan node then translates into an operator pipeline that specifies how each operation will be exactly executed in the DBMS. The operator pipeline then converts to TPL code. Each function inside the TPL code correspond to a piece of function inside the execution engine that will be evetually invoked once the compiled native code is run. For instance, \texttt{@tableDelete} corresponds to a C++ function \texttt{OpStorageInterfaceTableDelete} (a delete operation on a tuple slot of a table) in the execution engine.
 
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/ExpressionGeneration.png}
 \caption{Process for converting log records into native code.}
-\label{fig:logging}
+\label{fig:expression_generation}
 \end{figure}
-We imagine each recovery operation as a form of SQL statement that can be converted into native code through the code generation process discussed above. The code generation process for a log record can be divided into two steps: plan generation (creating the physical plan node) and plan translation (translating the plan into pipelines). Each recovery operation (\textbf{Insert}, \textbf{Update}, \textbf{Delete}) will be matched to a corresponding plan node.
+We imagine each replay as a form of SQL statement that can be converted into native code through the code generation process discussed above (\cref{fig:expression_generation}). The code generation process for a log record can be divided into two steps: plan generation (creating the physical plan node) and plan translation (translating the plan into pipelines). Each replay (Insert Replay, Update Replay, Delete Replay) will be matched to a corresponding plan node.
 
-\subsection{Insert Operation Conversion}
+\subsection{Insert Replay Conversion}
 
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/InsertConversion.png}
 \caption{Conversion from an Insert Redo Record into an Insert Plan Node. The tuple slot provided by the redo record is discarded.}
 \label{fig:insert_conversion}
 \end{figure}
-Insert plan nodes correspond to \texttt{INSERT} statements. For an insert redo record, we can represent it as the SQL statement \dbSQL{INSERT INTO x VALUES y}. The insert plan node for this statement does not require a child plan node to function. This makes it straightforward to convert from an insert redo record to a plan node. Index information and column ids can be retrieved from the catalog. Values stored in the redo records are in their most basic form (e.g. integer, float, double) as constants and can be converted into expressions to be accepted by the insert plan node. The operation of transferring values, however, require one-to-one copy of each value from the log record into the plan node. 
+Insert plan nodes correspond to \dbSQL{INSERT} statements. We can represent an insert redo record as the SQL statement \dbSQL{INSERT INTO x VALUES y}. The insert plan node for this statement does not require any child plan nodes to function (\cref{fig:insert_conversion}). This makes it straightforward to convert from an insert redo record to a plan node. Index information and column ids can be retrieved from the catalog. Values stored in the redo records are in their most basic form (e.g., integer, float, double) as constants and can be converted into expressions to be accepted by the insert plan node. The operation of transferring values, however, require one-to-one copy of each value from the log record into the plan node. 
 
-\subsection{Delete Operation Conversion}
-\begin{figure}[H]
+\subsection{Delete Replay Conversion}
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/DeleteConversion.png}
-\caption{Conversion from a Delete Redo Record into a Delete Plan Node. Tuple slot that will be used in the pipeline is "smuggled" from the redo record through execution context.}
+\caption{Conversion from a Delete Redo Record into a Delete Plan Node. Tuple slot that will be used in the pipeline is "smuggled" from the redo record through Execution Context.}
 \label{fig:delete_conversion}
 \end{figure}
 
-Delete plan nodes correspond to \texttt{DELETE} statements and require child nodes to function. A delete plan node uses the child plan node to figure out which tuple slot to schedule for deletion. This is different for delete records. The mapping from recovery manager combined with the original tuple slot already points to the tuple slot to delete. In this case, there will be no need for the plan node to go through the child node and resolve the delete tuple slot. This is because, eventually, the delete plan node will attempt to create a Delete Record, which is structurally identical to the Delete Record from the recovery manager. Other operations, such as index deletions, are still necessary.
+Delete plan nodes correspond to \dbSQL{DELETE} statements and require child nodes to function. A delete plan node uses the child plan node to figure out which tuple slot to schedule for deletion. This is different for delete records. The mapping from Recovery Manager combined with the original tuple slot already points to the tuple slot to delete. In this case, there will be no need for the plan node to go through the child node and resolve the delete tuple slot. This is because, eventually, the delete plan node will attempt to create a Delete Record, which is structurally identical to the Delete Record from the Recovery Manager. We will therefore change the behavior of the operator pipeline to retrieve the delete slot supplied by the recovery manager during recovery (\cref{fig:delete_conversion}), and remove the step to resolve which tuple slot to delete. Other operations, such as index deletions, are still necessary and are kept in place.
 
-\subsection{Update Operation Conversion}
-Update plan nodes correspond to \texttt{Update} statements and require child nodes to function. Unfortunately, update plan nodes are not very compatible with update redo records. After an update plan is translated into an update operator pipeline, it expects set clauses returned from the child node (e.g. sequential scan). These set clauses, however, describe higher-level logical operations and cannot be constructed easily as creating primitive expressions for insert plan nodes. 
-\begin{figure}[H]
+\subsection{Update Replay Conversion}
+Update plan nodes correspond to \dbSQL{Update} statements and require child nodes to function. Unfortunately, update plan nodes are not very compatible with update redo records. After an update plan is translated into an update operator pipeline, it expects set clauses returned from the child node (e.g., sequential scan). These set clauses, however, describe higher-level logical operations and cannot be constructed as easily and efficiently as creating primitive expressions for insert plan nodes. 
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/UpdateConversion.png}
 \caption{Conversion from an Update Redo Record into an Update Plan Node. Set clauses and child plan nodes inside the update plan node are discarded.}
 \label{fig:update_conversion}
 \end{figure}
-The update plan node therefore needs to be extended to accept primitive values just like an insert plan node. We then modify the operator pipeline to process the primitive values instead of set clauses during a recovery step. Functions inside the operator pipeline will now apply to the primitive value expression. Similar to delete record transformations, there is no need for the update pipeline to resolve the update tuple slot or creating a new update record, as these information already exist in an update redo record and the tuple slot mapping in the recovery manager.
+The update plan node therefore needs to be extended to accept primitive values like an insert plan node. We also modify the operator pipeline to process the primitive values instead of set clauses during a replay step (\cref{fig:update_conversion}). Functions inside the operator pipeline will now apply to the primitive value expressions. Similar to delete record transformations, there is no need for the update pipeline to resolve the update tuple slot or to create a new update record, as these information already exist in an update redo record and the tuple slot mapping in the Recovery Manager.
 
 
-\section{Execution}
-The compiled query is finally run by the execution engine. The compiled query invokes different operation codes (e.g. \texttt{OpStorageInterfaceTableDelete} in \ref{fig:codegen_example}) to complete the corresponding operator in the TPL code.
+\section{Recovery Execution}
+The execution engine is reponsible for running the compiled query. After we have finished the setup for compiling different replays into native code, we will explain how they will affect the execution engine.
 
+\subsection{Storage Interface}
+The compiled query invokes different operation codes (e.g., \texttt{OpStorageInterfaceTableDelete} in \cref{fig:codegen_example}) to complete the corresponding operator in the TPL code. Executing the operation codes requires access to the storage layer of the DBMS. In NoisePage, the storage layer is separate from the execution engine. Therefore, it uses a Storage Interface to interact with contents in the storage layer. The Storage Interface stores objects that allow manipulation over a certain DBMS table. These objects include an Execution Context, a redo record that will be used to persist changes done to the table, projected rows associated with the redo record and index objects associated with table. A Storage Interface is reconstructed every time an execution of a query begins, and is destructed after the query has been executed. We will need to modify functions that rely on the Storage Interface and access members that reside within the Storage Interface.
 
-We explained earlier that the for physical plan nodes, they are expected to retrieve relevant tuple slots from the recovery manager, instead of supplying the tuple slots for an operation. We can circumvent this rule by modifying operation code functions.
-
-\begin{figure}[H]
+\subsection{Execution Changes}
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/RecoveryExecution.png}
-\caption{Information from log record can be retrieved from the execution context.}
+\caption{Information from log record can be retrieved from the Execution Context.}
 \label{fig:recovery_execution}
 \end{figure}
 
-An execution context encapsulates information that is supplied by upper layers of the DBMS. These information include access to the database catalog, the transaction running the query, etc. For our purposes, we can add tuple slot information into the execution context. Since the execution context can be accessed throughout the execution of a compiled query, we can modify the behavior of operation codes to override with the recovery tuple slots if necessary.
+We explained in Section 3.2.2 and 3.2.3 that for our purposes, we expect deletes/updates to retrieve relevant tuple slots from the Recovery Manager. However, the built-in pipeline assumes that the tuple slots are retrieved later during execution. We can circumvent this rule by modifying operation code functions and the execution context. The operation code functions provide access to the Storage Interface that is required to access the execution context.
 
-For Delete and Update operations, we need to supply the execution context with the log record itself. Since we modified the delete translator to skip the process of looking through child plan node for objects to delete, we will deliver the Delete Record from the recovery manager directly to the operation codes that will be expecting a Delete Record generated by a regular delete plan node.
+An Execution Context encapsulates information that is supplied by upper layers of the DBMS. These information include access to the database catalog, the transaction running the query, etc. We can also add tuple slot information into the Execution Context. Since the Execution Context can be accessed throughout a Storage Interface, we can modify the behavior of operation codes to override with the recovery tuple slots, as shown in \cref{fig:recovery_execution}.
+
+For Delete and Update Replays, we need to supply the Execution Context with the log record itself. Since we modified the delete translator to skip the process of looking through child plan node for objects to delete, we will deliver the Delete Record from the Recovery Manager directly to the operation codes that will be expecting a Delete Record generated by a regular delete plan node. The same process applies to Update Replays.
 
 \section{Caching Optimization}
 
-The naive implementation for code generation searches for table metadata and re-compiles the native code every time the recovery manager reads in a new log record. This is very inefficient and requires huge amounts of memory access and copy. We can use caching techniques to reduce performance overhead.
+The naive implementation for code generation searches for table metadata and re-compiles the native code every time the Recovery Manager reads in a new log record. This is very inefficient and requires egregious amounts of memory access and copy. We can use caching techniques to reduce this performance overhead.
 
 \subsection{Metadata}
 Most of the metadata overhead is generated during the conversion step from a redo record into an insert plan node. For each table, the DBMS needs to figure out its relevant metadata. These operations require frequent lookup into the database catalog. As long as those metadata are bound to some table id, the DBMS can cache those metadata and re-use them for the same table. Some significant metadata are listed below:
 
 \subsubsection{Physical to Logical Column Mapping}
-The recovery manager needs to maintain a mapping from physical column ids to logical column ids for each table. This is required because the column ids recorded in the log records are physical ids, while all the query compilation components expect logical column ids. The mappings can be generated by looking into the DBMS catalog.
+The Recovery Manager needs to maintain a mapping from physical column ids to logical column ids for each table. This is required because the column ids recorded in the log records are physical ids, while all the query compilation components expect logical column ids. The mappings can be generated by looking into the DBMS catalog.
 \subsubsection{Column Value Type Mapping}
-For redo records, the recovery manager also needs to maintain a mapping from each column to its corresponding SQL value type (e.g. \dbSQL{INTEGER, FLOAT, VARLEN}). This mapping is used to correctly copy the values out of each redo record into a physical plan node.
+For redo records, the Recovery Manager also needs to maintain a mapping from each column to its corresponding SQL value type (e.g., \dbSQL{INTEGER, FLOAT, VARLEN}). This mapping is used to correctly copy the values out of each redo record into a physical plan node.
 \subsubsection{Catalog Access}
-Retrieving access to a database catalog is costly. Profiling results show that a single operation to retrieve catalog access can account for 10\% of total execution time. Therefore, a mapping is used to keep track of catalog accessors.
+Retrieving access to a database catalog is costly. Profiling results show that a single operation to retrieve catalog access can account for 10\% of total instructions of a replay step. Therefore, a mapping is used to keep track of catalog accessors.
 
 \subsection{Compiled Query}
-A major benefit of Query Compilation is that the compiled query can be reused by the execution engine. If the contents of a physical plan node remains largely unchanged, then there is no need to reconstruct the physical plan every time the recovery manager processes a log record.
+A major benefit of query compilation is that the compiled query can be reused by the execution engine. If the contents of a physical plan node remains largely unchanged, then there is no need to reconstruct the physical plan every time the Recovery Manager processes a log record.
 
-We can cache each type of recovery operation separately and use a combination of database and table id as unique identifiers. The cached query can be re-usesd as long as the table schema remains unchanged.
+We can cache each type of replay separately and use a combination of database and table id as unique identifiers. The Recovery Manager can re-use cached queries as long as the table schema associated with them remains unchanged.
 
 \subsubsection{Parameterization}
-\begin{figure}[H]
+\begin{figure}[t!]
 \centering
 \includegraphics[width=0.9\textwidth]{images/ParameterizedRedoRecord.png}
 \caption{Parameterized insert plan.}
 \label{fig:parameterization}
 \end{figure}
 
-Caching is trickier for recovery operations that need to transfer values into plan nodes. A primitive expression will change every time its underlying value changes. A solution to this is to parameterize the primitive expression given to a insert/update plan node. During run-time, the execution context pass in actual values into the parameterized expressions. This approach allows a compiled query to keep value type information for each table column and remain flexible enough to swap in actual values without recompilation.
+Caching is trickier for replays that need to transfer values into plan nodes. The recovery manager will need to reconstruct a primitive expression every time its underlying value changes. A solution to this is to parameterize the primitive expression given to an insert/update plan node. During run-time, the Execution Context pass in actual values into the parameterized expressions. This approach allows a compiled query to keep value type information for each table column and remain flexible enough to swap in actual values without recompilation.
 
 \chapter{Experimental Evaluation}
-We run our experiments on Ubuntu 20.04.
-Dual-socket 10-core Intel Xeon E5-2630v4 CPU, 128 GB of DRAM, and a 500 GB Samsung 970 EVO Plus SSD.
+We now evaluate the performance of our code generation recovery. The experiments focus on comparing the performance difference between code generation recovery and baseline recovery. Each experiment has two phases: the preparation phase and the recovery phase. During the preparation phase, we use three operations to generate log records: 
+\begin{itemize}
+    \item \dbSQL{INSERT} $\rightarrow$ \textbf{Insert Redo Record}: Create a random row with random values and insert into a random table.
+    \item \dbSQL{UPDATE} $\rightarrow$ \textbf{Update Redo Record}: For a random row from a random table, update a random tuple slot with a random value.
+    \item \dbSQL{DELETE} $\rightarrow$ \textbf{Delete Record}: For a random row from a random table, delete a random tuple slot.
+\end{itemize}
+We run these operations randomly for some number of times during the preparation phase. During the recovery phase, we load the log records into memory from disk and replay them with the Recovery Manager. We then measure the performance of only the replay step in our throughput measurement experiments.
+
+We conduct all the experiments on a machine with the following specifications:
+\begin{itemize}
+    \item \textbf{OS}: Ubuntu 20.04
+    \item \textbf{CPU}: Intel(R) Xeon(R) Gold 5218R CPU @ 2.10GHz
+    \item \textbf{RAM}: 188 GB 2 sockets, 20 cores/socket, 40 threads/socket
+\end{itemize}
 
 \section{Throughput Measurement}
+Log replay generates transactions through commit records (See Section 3.1.2). Therefore, we can use transactions throughput to measure the performance of the recovery phase. 
+
+We use Google Benchmark for our measurement setup. The table starts with an initial table size of $10^6$ tuples. During the preparation phase, we run five preparation operations for each transaction, with a total of $10^5$ transactions. Each table uses a single column and \dbSQL{INTEGER} data type.
+
 \subsection{Insert}
 \begin{table}[H]
 \begin{center}
-\begin{tabular}{ |c|c|c| } 
- \hline
-Statements Ratio & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\ 
- \hline
+\begin{tabular}{ c c c } 
+ \toprule
+\textbf{Statements Ratio} & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\ 
+ \toprule
  100\% Insert & $1.12 \times 10^4$ txns/s & $6.00 \times 10^3$ txns/s\\
- \hline
- 50\% Insert, 50\% Select & $1.32 \times 10$ txns/s & $6.60 \times 10^3$ txns/s \\ 
- \hline
+ \bottomrule
 \end{tabular}
-\caption{\textbf{Insert throughput measurement setup on a single table}. The table uses an initial table size of $10^6$. Each transaction runs 5 statements. A total of $10^5$ transactions are run.}
+\caption{\textbf{Insert Replay Throughput}.}
 \label{tab:throughput_exp_insert}
 \end{center}
 \end{table}
-We first measure the throughput (number of transactions executed per time period) of insert operations against the baseline recovery performance on a single table. The recovery manager uses only our insert implementation for recovery.
+We first measure the throughput (number of transactions executed per time period) of Insert Replays against the baseline recovery performance on a single table. The Recovery Manager uses only our insert replay implementation for recovery.
 
 \begin{table}[H]
 \begin{center}
-\begin{tabular}{ |c|c|c| } 
- \hline
-\textbf{IR} & \textbf{Percentage} & \textbf{Functionality} \\ 
- \hline
-79.35 & \textbf{81.7\%} & Query Execution (Op Codes)\\
- \hline
- 9.35 & 9.62\% & Execution Context Initialization \\ 
- \hline
- 6.19 & 6.37\% & Retrieving Redo Values \\
- \hline
- 2.26 & 2.32 \% & Metadata  Cache Map Access \\
- \hline
- 0.03 & 0.03 \% & Compile \\
- \hline
+\begin{tabular}{ l c c } 
+ \toprule
+\textbf{Functionality} & \textbf{IR\%} & \textbf{Normalized IR\%} \\ 
+ \toprule
+Query Execution (Op Codes) & 79.35 & 81.7\% \\
+ \midrule
+ Execution Context Initialization & 9.35 & 9.62\%  \\ 
+ \midrule
+ Retrieving Redo Values & 6.19 & 6.37\%  \\
+ \midrule
+ Metadata Cache Map Access & 2.26 & 2.32 \%  \\
+ \midrule
+ Compile & 0.03 & 0.03 \% \\
+ \bottomrule
 \end{tabular}
 
-\begin{tabular}{ |c|c|c| } 
- \hline
-\textbf{IR} & \textbf{Percentage} & \textbf{Operation Code}\\ 
- \hline
-29.88 & \textbf{74.4\%} & \texttt{StorageInterfaceInit}\\
- \hline
- 6.00 & 14.9\% & \texttt{StorageInterfaceTableInsert} \\ 
- \hline
- 2.76 & 6.87\% & \texttt{StorageInterfaceFree} \\
- \hline
- 1.40 & 3.48\% & \texttt{StorageInterfaceGetTablePR} \\
- \hline
- 0.12 & 0.35\% & \texttt{ExecOUFeatureVectorReset} \\
- \hline
-\end{tabular}
-\caption{\textbf{KCachegrind Analysis on Insert}. IR refers to the number of instructions executed in total by the selected function during a single recovery step.}
+\caption{\textbf{Callgrind breakdown on an Insert Replay step}. IR (instructions read) refers to the number of instructions read in total by the selected function during a certain function execution.}
 \label{tab:throughput_exp_insert_overhead_all}
 \end{center}
 \end{table}
-Results show that the code generation throughput is 47\% slower than the baseline implementation. Profiling result \ref{tab:throughput_exp_insert_overhead_all} explains that 81.7\% of the slow down comes from the execution of the compiled query. This is unexpected, as we imangined that most of the overhead would come from memory copies for extracting values, but those memory copy overhead only accounts for 6\%.
 
-A further dive into the composition of query execution shows that 74.4\% of the overhead comes from \texttt{StorageInterfaceInit}, which is a function that initializes a storage interface. The storage interface stores objects that allow manipulation over a certain DBMS table. These objects can include the execution context, redo deltas and index objects associated with table. The storage interface is reconstructed every time an execution of a query begins, and is destructed after the query has been executed.
-
-\subsection{Delete}
-We then measure throughput of delete operations against the baseline. The recovery manager uses only our delete implementation for recovery.
 \begin{table}[H]
 \begin{center}
-\begin{tabular}{ |c|c|c| } 
- \hline
-Statements Ratio & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\
- \hline
- 90\% Insert, 10\% Delete & $1.12 \times 10^4$ txns/s & $1.06 \times 10^4$ txns/s \\ 
- \hline
- 80\% Insert, 20\% Delete & $1.11 \times 10^4$ txns/s & $1.07 \times 10^4$ txns/s\\
-  \hline
- 75\% Insert, 25\% Delete & $1.13 \times 10^4$ txns/s & $1.03 \times 10^4$ txns/s\\
- \hline
+\resizebox{\columnwidth}{!}{\begin{tabular}{ l c c l } 
+ \toprule
+\textbf{Operation Code} & \textbf{IR\%} & \textbf{Normalized IR\%} & \textbf{Description}\\ 
+ \toprule
+\texttt{StorageInterfaceInit} & 29.88 & 74.4\% & Initializes a Storage Interface. \\
+ \midrule
+\texttt{StorageInterfaceTableInsert} & 6.00 & 14.9\% & Inserts a tuple into a table.\\ 
+ \midrule
+\texttt{StorageInterfaceFree} & 2.76 & 6.87\% & Deallocates a Storage Interface.\\
+ \midrule
+\texttt{StorageInterfaceGetTablePR} & 1.40 & 3.48\% & Retrieves a table's projected row.\\
+ \midrule
+Other & 0.12 & 0.35\% & \\
+ \bottomrule
+\end{tabular}}
+\caption{\textbf{Callgrind breakdown on the Query Execution step of an Insert Replay step}.}
+\label{tab:throughput_exp_insert_overhead_all}
+\end{center}
+\end{table}
+Results show that the code generation throughput is 47\% slower than the baseline implementation. Profiling result \cref{tab:throughput_exp_insert_overhead_all} explains that 81.7\% of the slow down comes from the execution of the compiled query. This is unexpected, as we imangined that most of the overhead would come from memory copies for extracting values, but those memory copy overhead only accounts for 6\%.
+
+A further dive into the composition of query execution shows that 74.4\% of the overhead comes from \texttt{StorageInterfaceInit}, which is a function that initializes a Storage Interface, as explained in Section 3.3. 
+
+\subsection{Delete}
+We then measure throughput of Delete Replays against the baseline. The Recovery Manager uses only our delete replay implementation for recovery.
+\begin{table}[H]
+\begin{center}
+\begin{tabular}{ c c c } 
+ \toprule
+\textbf{Statements Ratio} & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\
+ \toprule
+ 90\% Insert, 10\% Delete & $1.12 \times 10^4$ txns/s & $1.08\times 10^4$ txns/s \\ 
+ \midrule
+ 75\% Insert, 25\% Delete & $1.11 \times 10^4$ txns/s & $1.07 \times 10^4$ txns/s\\
+ \midrule
+ 50\% Insert, 50\% Delete & $1.09 \times 10^4$ txns/s & $9.31 \times 10^3$ txns/s\\
+ \bottomrule
 \end{tabular}
-\caption{\textbf{Delete throughput measurement setup on a single table}. The table uses the same setup in \ref{tab:throughput_exp_insert}.}
+\caption{\textbf{Delete Replay Throughput}.}
 \label{tab:throughput_exp_delete}
 \end{center}
 \end{table}
 
-Performance of delete is closer to the baseline than insert, with code generation performance aroudn 90\% to 95\% of baseline performance. The performance of delete is close to our expectation, as delete does not require any memory copies from a redo record like an insert does. Executing a delete is also a lightweight operation, as we have prevented the pipeline from performing extra work as shown in Section 3.2.2.
+Code generation throughput results of Delete Replays are much closer to the baseline (90\% to 95\%), compared to those of Insert Replays. This is mainly because a delete operation does not require any memory copies from a redo record. Moreover, executing a delete operation is also a lightweight operation, as we have prevented the pipeline from performing extra work as explained in Section 3.2.2.
 
-\subsection{Update}
-Finally, we measure throughput of delete operations against the baseline. The recovery manager uses only our delete implementation for recovery.
 \begin{table}[H]
 \begin{center}
-\begin{tabular}{ |c|c|c| } 
- \hline
-Statements Ratio & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\ 
- \hline
- 90\% Insert, 10\% Update & $???$ txns/s & $???$ txns/s\\
-  \hline
- 75\% Insert, 25\% Update & $???$ txns/s & $5.6 \times 10^3$ txns/s\\
- \hline
- 50\% Insert, 50\% Update & $???$ txns/s & $10^4$ txns/s \\ 
- \hline
+\begin{tabular}{ l c c l } 
+ \toprule
+\textbf{Functionality} & \textbf{IR\%} & \textbf{Normalized IR\%}\\ 
+ \toprule
+Query Execution (Op Codes) & 90.40\% & 91.46\%\\
+ \midrule
+ Execution Context Initialization & 3.70\% & 3.74\% \\ 
+ \midrule
+ Delete Record Initialization &4.22\% & 4.27\% \\
+ \midrule
+ Metadata Cache Map Access & 0.36\% & 0.36\% \\
+ \midrule
+ Compile & 0.17\% & 0.17\% \\
+ \bottomrule
 \end{tabular}
-\caption{\textbf{Update throughput measurement setup on a single table}. The table uses the same setup in \ref{tab:throughput_exp_insert}.}
+
+\caption{\textbf{Callgrind breakdown on a Delete Replay step}.}
+\label{tab:throughput_exp_delete_overhead_all}
+\end{center}
+\end{table}
+
+\begin{table}[H]
+\begin{center}
+\resizebox{\columnwidth}{!}{\begin{tabular}{ l c c l } 
+ \toprule
+\textbf{Operation Code} & \textbf{IR\%} & \textbf{Normalized IR\%} & \textbf{Description}\\ 
+ \toprule
+\texttt{StorageInterfaceInit} & 24.35 & 76.27\% & Initializes a Storage Interface.\\
+ \midrule
+ \texttt{StorageInterfaceTableDelete} & 5.80 & 18.16\% & Deletes a tuple from a table.\\ 
+ \midrule
+ \texttt{StorageInterfaceFree} & 1.55 & 4.85\% & Deallocates a Storage Interface.\\
+ \midrule
+ Other & 0.13 & 0.41\% & \\
+ \midrule
+ \texttt{StorageInterfaceGetTablePR} & 0.10 & 0.31\% & Retrieves a table's projected row.\\
+ \bottomrule
+\end{tabular}}
+\caption{\textbf{Callgrind breakdown on the Query Execution step of a Delete Replay step}.}
+\label{tab:throughput_exp_delete_overhead_all}
+\end{center}
+\end{table}
+
+Callgrind analysis shows that, similar to an insert operation, a delete operation is heavily bottlenecked by query execution and initializing the Storage Interface.
+
+\subsection{Update}
+Finally, we measure throughput of Update Replays against the baseline. The Recovery Manager uses only our update replay implementation for recovery.
+\begin{table}[H]
+\begin{center}
+\begin{tabular}{ c c c } 
+ \toprule
+\textbf{Statements Ratio} & \textbf{Baseline Throughput} & \textbf{Codegen Throughput}\\ 
+ \toprule
+ 90\% Insert, 10\% Update & $1.15 \times 10^4$ txns/s & $7.46 \times 10^3$ txns/s\\
+ \midrule
+ 75\% Insert, 25\% Update & $1.15 \times 10^4$ txns/s & $7.31 \times 10^3$ txns/s\\
+ \midrule
+ 50\% Insert, 50\% Update & $1.15 \times 10^4$ txns/s & $6.68 \times 10^3$ txns/s \\ 
+ \bottomrule
+\end{tabular}
+\caption{\textbf{Update Replay Throughput}.}
 \label{tab:throughput_exp_update}
 \end{center}
 \end{table}
+The performance of an Update Replay is similar to an Insert Replay. Code generated updates are more heavyweight compared to the baseline insert operations and update operations due to initialization overheads of the Storage Interface. Therefore, as the proportion of update statements increases, we notice a consistent drop on the code generation throughput.
 
-\section{Throughput Measurement With Indexes}
-In the baseline recovery architecture, the recovery manager implements a custom index update function that is independent from the query execution engine. This index update function is largely hard-coded and contains large amounts of memory copy operations. The code generation approach, however, use the built-in execution engine for index updates. We believe as the number of indexes increases, the performance gap between baseline and the code generation approach will shorten.
 \begin{table}[H]
 \begin{center}
-\begin{tabular}{ |c|c|c|c|c| } 
- \hline
-Statements Ratio & \#Indexes & \textbf{Baseline Throughput} & \textbf{Codegen Throughput} & \textbf{Baseline:Codegen} \\ 
- \hline
- 100\% Insert & 5 & $3.97 \times 10^4$ txns/s & $2.65 \times 10^4$ txns/s & 1.50\\
- \hline
- 100\% Insert & 10 & $2.37 \times 10^4$ txns/s & $1.7 \times 10^4$ txns/s & 1.40\\
- \hline
- 100\% Insert & 100 & $3.30 \times 10^3$ txns/s & $2.49 \times 10^3$ txns/s & 1.32\\
- \hline
+\begin{tabular}{ l c c } 
+ \toprule
+ \textbf{Functionality} & \textbf{IR\%} & \textbf{IR\%/sum(IR\%)} \\ 
+ \toprule
+Query Execution (Op Codes) & 80.08 & 83.50\% \\
+ \midrule
+ Execution Context Initialization & 9.41 & 9.81\% \\ 
+ \midrule
+ Retrieving Record Values & 4.98 & 5.19\% \\
+ \midrule
+ Metadata Cache Map Access & 1.27 & 1.32 \% \\
+ \midrule
+ Compile & 0.18 & 0.18 \% \\
+ \bottomrule
 \end{tabular}
-\caption{\textbf{Insert throughput measurement setup on a single table with indexes}. The table uses the same setup in \ref{tab:throughput_exp_insert}.}
-\label{tab:throughput_exp_index_insert}
+
+\caption{\textbf{Callgrind breakdown on an Update Replay step}.}
+\label{tab:throughput_exp_update_overhead_all}
 \end{center}
 \end{table}
 
-\section{Throughput Measurement With Constraints}
+\begin{table}[H]
+\begin{center}
+\resizebox{\columnwidth}{!}{\begin{tabular}{ l c c l } 
+ \toprule
+\textbf{Operation Code} & \textbf{IR\%} & \textbf{IR\%/sum(IR\%)} & \textbf{Description}\\ 
+ \toprule
+\texttt{StorageInterfaceInit} & 29.84 & 72.50\% & Initializes a Storage Interface.\\
+ \midrule
+ \texttt{StorageInterfaceTableUpdate} & 8.42 & 20.46\% & Updates a tuple of a table.\\ 
+ \midrule
+ \texttt{StorageInterfaceFree} & 2.78 & 6.75\% & Deallocates a Storage Interface.\\
+ \midrule
+ Other & 0.12 & 0.29\% & \\
+ \bottomrule
+\end{tabular}}
+\caption{\textbf{Callgrind breakdown on the Query Execution step of an Update Replay step}.}
+\label{tab:throughput_exp_update_overhead_all}
+\end{center}
+\end{table}
+
+Callgrind analysis shows that an update operation is also spending most of its time on query execution and creating the Storage Interface. Combined with results from Section 4.1.1 and 4.1.2, we can confirm that the allocation/deallocation Storage Interface becomes the main bottleneck of all the code generation replays.
+
+\section{Throughput Measurement With Indexes}
+For in-memory DBMS, indexes are rarely stored on disk. Instead, they are reconstructed during log replay. However, this introduces design problems for an execution engine that has been adapted to work with compiled code. The recovery system needs to implement functionally redundant code to replay the indexes.
+
+In the baseline recovery architecture, the Recovery Manager implements a custom index update function that is independent from the query execution engine. The code generation approach, however, uses the built-in execution engine for index updates. We believe as the number of indexes increases, the performance gap between baseline and the code generation approach will diminish.
+
+\begin{figure}[t!]
+\centering
+\begin{subfigure}{.45\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/IndexRecoveryThroughput.png}
+ \caption{Recovery throughput over the number of indexes. Red is baseline, blue is code generation.}
+  \label{fig:index_recovery_throughput}
+\end{subfigure}
+\begin{subfigure}{.45\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/IndexRecoveryRatio.png}
+ \caption{Throughput ratio between code generation and baseline implementation.}
+  \label{fig:index_recovery_ratio}
+\end{subfigure}
+\caption{\textbf{Recovery with Indexes}.}
+\label{fig:index_recovery_throughput}
+\end{figure}
+
+For this experiment, we want to focus on the comparison for index recovery and avoid as much overhead from other operations as possible. Therefore, we go for a much lighter insert setup. However, it should be noted that some of the heavy overhead is still unavoidable (e.g., value copies, Storage Interface construction/destruction).
+
+We create an empty table with a single column that accepts \dbSQL{INTEGER} data type. We execute $10^6$ transactions to insert random integers into the table. For each data point, we create an increasing number of indexes for the table. Results show that as the number of indexes increases, the gap between the baseline and code generation implementation steadily decreases. Note that without any indexes, the gap between baseline and code generation is around two times, which matches the results from \cref{tab:throughput_exp_insert}.
+
+\begin{table}[H]
+\begin{center}
+\begin{tabular}{ l c c } 
+ \toprule
+\textbf{Functionality} & \textbf{IR\%} & \textbf{Normalized IR\%}\\ 
+ \toprule
+Index Update & 96.23 & 96.3\% \\
+ \midrule
+Insert & 3.11 & 3.11\% \\ 
+ \midrule
+Other (e.g., tuple map access) & 0.57 & 0.59\% \\
+ \bottomrule
+\end{tabular}
+\caption{\textbf{Callgrind breakdown on Baseline Index Recovery}.  Number of indexes is 10.}
+\label{tab:throughput_exp_insert_overhead_all}
+\end{center}
+\end{table}
+
+\begin{table}[H]
+\begin{center}
+\resizebox{\columnwidth}{!}{\begin{tabular}{ l c c l }
+ \toprule
+\textbf{Operation Code} & \textbf{IR\%} & \textbf{Normalized IR\%} & \textbf{Description}\\ 
+ \toprule
+\texttt{StorageInterfaceIndexInsertUnique} & 33.77 & 37.9\% & Insert into an index.\\
+ \midrule
+ \texttt{StorageInterfaceInit} & 32.22 & 36.2\% & Initializes a Storage Interface.\\ 
+ \midrule
+ \texttt{StorageInertfaceGetIndexPR} & 20.95 & 23.5\% & Retrieves an index's projected row.\\
+ \midrule
+ \texttt{StorageInterfaceTableInsert} & 1.46 & 1.63\% & Insert a tuple into a table.\\
+ \midrule
+ \texttt{StorageInterfaceTablFree} & 0.39 & 0.43\% & Deallocates a Storage Interface.\\
+ \midrule
+ \texttt{StorageInterfaceGetTablePR} & 0.25 & 0.3\% & Retrieves a table's projected row.\\
+ \midrule
+ Other & 0.02 & 0.02\% &  \\
+ \bottomrule
+\end{tabular}}
+\caption{\textbf{Callgrind breakdown on a Query Execution step of Code Generation Index Recovery}. Number of indexes is 10. The query execution step accounts for 96\% IR for a single replay step.}
+\label{tab:throughput_exp_insert_overhead_all}
+\end{center}
+\end{table}
+
+A deeper dive into the implementations shows a percentage difference in index updates between the two approaches. Index updates account for $96.3\%$ of total instructions in the baseline implementation. On the other hand, for the code generation approach, index update accounts for $37.9\% + 23.5\% = 61.4\%$ of total instructions. This implies that the code generation requires less overhead to prepare for an insert index operation.
+
+\section{Throughput Measurement With Scaling Columns}
+\begin{figure}[ht!]
+\centering
+\begin{subfigure}{.44\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/ColumnRecovery.png}
+ \caption{Throughput over the number of columns. Red is baseline, blue is code generation.}
+  \label{fig:col_recovery_throughput}
+\end{subfigure}%
+\begin{subfigure}{.45\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/ColumnRecoveryRatio.png}
+ \caption{Throughput ratio between code generation and baseline implementation.}
+  \label{fig:col_recovery_ratio}
+\end{subfigure}
+\caption{\textbf{Recovery with Scaling Number of Columns}.}
+\label{fig:col_recovery_throughput}
+\end{figure}
+
+\begin{figure}[ht!]
+\centering
+\begin{subfigure}{.44\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/ColumnRecoveryIndex.png}
+ \caption{Throughput over the number of columns. Red is baseline, blue is code generation.}
+  \label{fig:col_recovery_throughput_index}
+\end{subfigure}%
+\begin{subfigure}{.45\textwidth}
+ \centering
+ \includegraphics[width=1.0\textwidth]{images/ColumnRecoveryIndexRatio.png}
+ \caption{Throughput ratio between code generation and baseline implementation.}
+  \label{fig:col_recovery_ratio_index}
+\end{subfigure}
+\caption{\textbf{Recovery with Scaling Number of Columns}. Number of Indexes is 10. }
+\label{fig:col_recovery_throughput_index}
+\end{figure}
 
 \chapter{Related Work}
-\chapter{Conclusion}
+Our code generation approach applies for DBMSs that use physical logging for recovery. It does not apply to DBMSs that use other logging schemes, such as logical logging and physiological logging. For instance, VoltDB\cite{malviya14} uses a form of physiological logging known as command logging. The DBMS records the transactions instead of physical changes in the log records. 
+
+Our method also does not extend to systems that do not have logging architectures. SAP HANA\cite{lee18} uses a log-less approach through parallel table replication.
+
+\chapter{Conclusion and Future Work}
+We presented a code generation recovery approach for DBMS. Our method integrates the code generation Execution Engine with the recovery system by converting log records into compiled native code. We provided an overview of the logging and query compilation architecture of NoisePage. We then showed how we implemented our approach within NoisePage. Finally, we evaluated our approach with throughtput experiments to show that while code generation recovery has worse recovery throughput compared to NoisePage baseline recovery, it offers less engineering overhead and is more efficient in processing index updates.
+
+Our results show that the initialization process for executing compiled queries (e.g., creating Storage Interface) is the main bottleneck for code generation recovery in NoisePage. One possible optimization is to cache reusable objects that are repeatedly initialization during query execution inside the recovery system or the execution engine.
 
 %\appendix
 %\include{appendix}
