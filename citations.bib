@@ -1,19 +1,3 @@
-@InProceedings{
-    tandem,
-    editor="Gawlick, Dieter
-    and Haynie, Mark
-    and Reuter, Andreas",
-    title="NonStop SQL: A distributed, high-performance, high-availability implementation of SQL",
-    booktitle="High Performance Transaction Systems",
-    year="1989",
-    publisher="Springer Berlin Heidelberg",
-    address="Berlin, Heidelberg",
-    pages="60--104",
-    abstract="NonStop SQL is an implementation of ANSI SQL on Tandem Computer Systems. It provides distributed data and distributed execution. It can run on small computers and has been benchmarked at over 200 transactions per second on a large system. Hence, it is useable in both the information center and in production environments. NonStop SQL provides high-availability through a combination of NonStop device support and transaction mechanisms. The combination of SQL semantics and a message-based distributed operating system gives a surprising result: the message savings of a relational interface pay for the extra semantics of the SQL language when compared to record-at-a-time interfaces.",
-    isbn="978-3-540-46155-5",
-    url=https://link.springer.com/chapter/10.1007/3-540-51085-0_43
-},
-
 @misc{
     noisepage,
     author = {{CMUDB Group}},
@@ -75,19 +59,6 @@ publisher = {Association for Computing Machinery},
 address = {New York, NY, USA},
 url = {https://doi.org/10.1145/38713.38730},
 doi = {10.1145/38713.38730},
-abstract = {With memory prices dropping and memory sizes increasing accordingly, a number of researchers
-are addressing the problem of designing high-performance database systems for managing
-memory-resident data. In this paper we address the recovery problem in the context
-of such a system. We argue that existing database recovery schemes fall short of meeting
-the requirements of such a system, and we present a new recovery mechanism which is
-designed to overcome their shortcomings. The proposed mechanism takes advantage of
-a few megabytes of reliable memory in order to organize recovery information on a
-per “object” basis. As a result, it is able to amortize the cost of checkpoints over
-a controllable number of updates, and it is also able to separate post-crash recovery
-into two phases—high-speed recovery of data which is needed immediately by transactions,
-and background recovery of the remaining portions of the database. A simple performance
-analysis is undertaken, and the results suggest our mechanism should perform well
-in a high-performance, memory-resident database environment.},
 booktitle = {Proceedings of the 1987 ACM SIGMOD International Conference on Management of Data},
 pages = {104–117},
 numpages = {14},
@@ -124,24 +95,6 @@ pages = {465–477},
 numpages = {13},
 location = {Broomfield, CO},
 series = {OSDI'14}
-}
-
-@article{lee18,
- author = {Lee, Juchang and Han, Wook-Shin and Na, Hyoung Jun and Park, Chang Gyoo and Kim, Kyu Hwan and Kim, Deok Hoe and Lee, Joo Yeon and Cha, Sang Kyun and Moon, Seunghyun},
- title = {Parallel Replication Across Formats for Scaling out Mixed OLTP/OLAP Workloads in Main-memory Databases},
- journal = {The VLDB Journal},
- issue_date = {June 2018},
- volume = {27},
- number = {3},
- month = jun,
- year = {2018},
- pages = {421--444},
- numpages = {24},
- url = {https://doi.org/10.1007/s00778-018-0503-z},
- acmid = {3231517},
- publisher = {Springer-Verlag},
- address = {Berlin, Heidelberg},
- keywords = {Database replication, In-memory database, SAP HANA, Scaling out},
 }
 
 @article{malviya14,
@@ -446,3 +399,41 @@ series = {SIGMOD '95}
     title = {TPC Benchmark Status},
     year  = {2015}
 }
+
+@INPROCEEDINGS{kemper11,
+  author={Kemper, Alfons and Neumann, Thomas},
+  booktitle={2011 IEEE 27th International Conference on Data Engineering}, 
+  title={HyPer: A hybrid OLTP amp;OLAP main memory database system based on virtual memory snapshots}, 
+  year={2011},
+  volume={},
+  number={},
+  pages={195-206},
+  doi={10.1109/ICDE.2011.5767867}
+}
+
+@book{gray92,
+author = {Gray, Jim and Reuter, Andreas},
+title = {Transaction Processing: Concepts and Techniques},
+year = {1992},
+isbn = {1558601902},
+publisher = {Morgan Kaufmann Publishers Inc.},
+address = {San Francisco, CA, USA},
+edition = {1st},
+}
+
+@article{lomet11,
+author = {Lomet, David and Tzoumas, Kostas and Zwilling, Michael},
+title = {Implementing Performance Competitive Logical Recovery},
+year = {2011},
+issue_date = {April 2011},
+publisher = {VLDB Endowment},
+volume = {4},
+number = {7},
+issn = {2150-8097},
+url = {https://doi.org/10.14778/1988776.1988779},
+journal = {Proc. VLDB Endow.},
+month = apr,
+pages = {430–439},
+numpages = {10}
+}
+

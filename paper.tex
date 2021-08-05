@@ -61,7 +61,7 @@
 \usepackage[letterpaper,twoside,vscale=.8,hscale=.75,nomarginpar,hmarginratio=1:1]{geometry}
 
 % Provides a draft mark at the top of the document. 
-\draftstamp{\today}{DRAFT}
+% \draftstamp{\today}{DRAFT}
 
 \begin {document} 
 \frontmatter
@@ -74,7 +74,7 @@
 \author{Tianlei Pan}
 \date{June}
 \Year{2021}
-\trnumber{}
+\trnumber{CMU-CS-21-131}
 
 \committee{
 Andy Pavlo, Chair \\
@@ -104,7 +104,10 @@ Code generation is an optimization technique for improving query execution throu
 \end{abstract}
 
 \begin{acknowledgments}
-yes
+I would like to thank my professor Andy Pavlo for guiding me through my journey at the CMU Database Group. His passion, energy and commitment motivated me to pursue research in database systems in the first place. I will carry on with my life with the valuable lessons that I learned from him. I would also like to thank my peers in the CMU Database Group for working with me and carrying me through my research work. Finally, I want to thank my family for their unwavering support.
+\newline
+
+I wish you all the best.
 \end{acknowledgments}
 
 
@@ -440,6 +443,7 @@ We first use the Recovery Manager to set the required tuple slots and projected 
 
 During recovery, for each operation code function that needs to use predetermined tuple slots/projected row for delete/update replays, we enforce it to access those values from the execution context (\cref{fig:recovery_execution}). During the execution of operation codes, NoisePage uses a storage interface object to manipulate over a certain DBMS table. The execution engine initalizes the storage interface object with the execution context. Therefore, the storage interface provides access for the operation codes to access information in the log record from the Recovery Manager.
 \section{Caching Optimization}
+\label{caching_optimization}
 
 The naive implementation for code generation searches for table metadata and re-compiles the native code every time the Recovery Manager reads in a new log record. This is very inefficient and requires egregious amounts of memory access and copy. We can use caching techniques to reduce this performance overhead.
 
@@ -811,16 +815,21 @@ Results from the insert test (\cref{fig:col_insert_recovery_throughput}) show th
 The index recovery test showed that for index recovery, a higher number of columns have a positive effect in decreasing the gap between code generation recovery and baseline recovery (\cref{fig:col_recovery_throughput_index}). Index recovery has lower execution initialization overhead compared to insert recovery (See \cref{tab:throughput_exp_index_exec_overhead_all}, \cref{tab:throughput_exp_insert_exec_overhead_all}).
 
 \chapter{Related Work}
-We have not yet located papers that discuss database recovery with code generation. Therefore, in this section, we discuss systems that use implementations that differ from our method assumptions. We then show whether and how our code generation approach applies to them.
+In this section, we discuss DBMSs with recovery systems that differ from our method assumptions. We then show whether and how our code generation approach applies to them.
+\newline
 
-To begin with, our method does not extend to systems that do not have logging architectures. Some in-memory databases follows the K+1 replication protocol to ensure database durability. SAP HANA\cite{lee18} uses a log-less approach through parallel table replication.
+To begin with, our method does not extend to DBMSs that do not have logging architectures. We cannot apply our log record conversion logic to those systems. For instance, Scuba~\cite{scuba14} proposed a recovery system that uses shared memory to persist data between processes. On database shutdown, Scuba copies data directly from memory heap to shared memory. On restart, Scuba retrieves stored DBMS memory from shared memory. This recovery system does not depend on log records, so we cannot apply our approach to such systems.
+\newline
 
-Our code generation approach focuses on DBMSs that use physical logging for recovery. However, there are many DBMSs that use other logging schemes, such as logical logging and physiological logging. For instance, VoltDB\cite{malviya14} uses a form of physiological logging known as command logging. The DBMS records the transactions instead of physical changes in the log records.
+Our code generation approach focuses on DBMSs that use physical logging for recovery. However, there are DBMSs that use other logging schemes, such as logical logging and physiological logging~\cite{gray92}. For instance, VoltDB~\cite{malviya14} uses a form of physiological logging known as command logging. The DBMS records transactions instead of physical table changes in the log records. Nevertheless, those log records still correspond to insert, delete, or update operations on the DBMS table. Therefore, we can still apply our log record conversion process to the VoltDB's recovery framework. Hyper~\cite{kemper11} uses logical redo records that keeps the parameters of the stored procedures (i.e. a custom high-level scripting language) that represent the transactions. Hyper uses the stored procedures to provide functionalities such as index, delete, and update. Therefore, we can apply our approach to Hyper by restoring stored procedures using parameters from the log records. We then convert the procedures into respective plan nodes. In fact, converting from logical log records into physical plans might be easier than that for physical log records. According to \cref{insert_replay_conversion}, physical plans expect logical values and data structures (e.g. column ids, \dbSQL{SET} clauses) that can potentially exist directly in logical log records.
+\newline
+
+Many in-memory DBMSs also implement parallel recovery to reduce recovery time~\cite{faeber17}. Hekaton~\cite{hekaton2013} uses a thread per core architecture to handle parallel insertion of the data from log records. SiloR~\cite{silo_r} parallelizes recovery by using an epoch system and value logging that allow the recovery system to process log records in arbitrary order. During replay, the recovery system uses multiple log processors to replay log records from newest to oldest. Our code generation recovery approach might introduce extra overhead for parallelization. The recovery system needs to access multiple hash tables (\cref{caching_optimization}) that are necessary for executing compiled queries. This means that with multiple recovery threads, they need to read and modify those hash tables concurrently. All of the hash tables use keys based on database and table ids. Unless the recovery threads manage to operate on separate tables, the recovery system needs to install extra latches on the hash tables. As as result, this incurs performance bottlenecks for parallel recovery.
 
 \chapter{Conclusion and Future Work}
-We presented a code generation recovery approach for DBMS. Our method integrates the code generation Execution Engine with the recovery system by converting log records into compiled native code. We provided an overview of the logging and query compilation architecture of NoisePage. We then showed how we implemented our approach within NoisePage. Finally, we evaluated our approach with throughtput experiments to show that while code generation recovery has worse recovery throughput compared to NoisePage baseline recovery, it offers less engineering overhead and is more efficient in processing index updates.
+We presented a code generation recovery approach for in-memory DBMSs. Our method integrates the code generation execution engine with the recovery system by converting log records into physical plans and compiling them into native code. We provided an overview of the logging and query compilation architecture of NoisePage. We then showed how we implemented our approach within NoisePage. Finally, we evaluated our approach with throughput experiments. The results show that while code generation recovery has worse recovery throughput compared to NoisePage's baseline recovery, it offers less engineering overhead and is more efficient in processing index updates.
 
-Our results show that the initialization process for executing compiled queries (i.e., creating storage interface) is the main bottleneck for code generation recovery in NoisePage. One possible optimization is to cache reusable objects that are repeatedly initialized during query execution.
+We confirmed that the execution initialization for compiled queries is the main bottleneck for code generation recovery in NoisePage. A possible solution to this is to cache reusable objects that are repeatedly initialized during query execution. We will explore on more solutions to this problem and continue to improve our code generation recovery based on our current implementation in NoisePage. 
 
 %\appendix
 %\include{appendix}
